@@ -1,0 +1,23 @@
+[project]
+name = "heston-project"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "6>=6",
+    "ipykernel>=7.0.1",
+    "ipywidgets>=8.1.8",
+    "matplotlib>=3.10.7",
+    "numpy>=2.3.4",
+    "pandas>=2.3.3",
+    "pydantic>=2.12.3",
+    "scikit-learn>=1.7.2",
+    "seaborn>=0.13.2",
+    "yfinance>=0.2.66",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.0.1",
+]
