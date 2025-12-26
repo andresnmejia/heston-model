@@ -1,18 +1,16 @@
 import numpy as np
+from pydantic import BaseModel, ConfigDict
 from scipy.integrate import quad_vec
-from pydantic import BaseModel,  ConfigDict, model_validator
-import warnings
+
+# This class contains any computations required without any data
 
 
-
-
-#This class contains any computations required without any data
 class HestonModel(BaseModel):
     v0: float  # Initial variance
-    v_bar: float  # Long-term variance 
+    v_bar: float  # Long-term variance
     rho: float  # Correlation between S0 and variance
-    kappa: float  # Mean reversion speed 
-    sigma: float  # Volatility of volatility 
+    kappa: float  # Mean reversion speed
+    sigma: float  # Volatility of volatility
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def to_array(self) -> np.ndarray:
@@ -22,21 +20,6 @@ class HestonModel(BaseModel):
     def from_array(cls, arr: np.ndarray) -> "HestonModel":
         """Create from array: [v0, v̄, ρ, κ, σ]"""
         return cls(v0=arr[0], v_bar=arr[1], rho=arr[2], kappa=arr[3], sigma=arr[4])
-    
-    @model_validator(mode='after')
-    def Feller(self) ->'HestonModel':
-        feller:bool = 2 * self.kappa * self.v_bar > self.sigma**2
-        
-        if   not (feller
-            and self.v0 > 0
-            and self.kappa > 0
-            and self.v_bar > 0
-            and self.sigma > 0
-            and -1 <= self.rho <= 1
-        ):
-            warnings.warn('Feller condition not satisfied')
-        return self
-            
 
     # Helper functions following paper notation exactly
     def __xi(self, u: complex) -> complex:
@@ -149,22 +132,22 @@ class HestonModel(BaseModel):
             - t * self.v_bar * self.rho * i * u / self.sigma
         )
         h5 = (
-            -self.v0*(A_dsigma)
-            - 4
+            -self.v0 * (A_dsigma)
+            - 4 * self.kappa * self.v_bar / (self.sigma**3) * D_val
+            + 2
             * self.kappa
             * self.v_bar
-            / (self.sigma**3) * D_val+2*self.kappa*self.v_bar/(self.sigma**2 * d_val)*(d_dsigma-d_val/A2_val*A2_dsigma)+t*self.kappa*self.v_bar*self.rho*i*u/(self.sigma**2))
+            / (self.sigma**2 * d_val)
+            * (d_dsigma - d_val / A2_val * A2_dsigma)
+            + t * self.kappa * self.v_bar * self.rho * i * u / (self.sigma**2)
+        )
         return np.vstack([h1, h2, h3, h4, h5])
-        
 
-
-
-
-    def __characteristic_function(self,
-        S0: float, r: float, u: complex, t: np.ndarray
-    ):
-        
+    def __characteristic_function(self, S0: np.ndarray | float, r: float, u: complex, t: np.ndarray):
         i = 1j
+        
+        # Ensure S0 is an array for consistent broadcasting
+        S0 = np.atleast_1d(S0)
 
         return np.exp(
             i * u * np.log(S0)
@@ -174,46 +157,47 @@ class HestonModel(BaseModel):
             + 2 * self.kappa * self.v_bar / self.sigma**2 * self.__D(u, t)
         )
 
-
-    def _heston_price_call(self,
-        S0: float, r: float, K: np.ndarray, T: np.ndarray
+    def _heston_price_call(
+        self, S0: np.ndarray | float, r: float, K: np.ndarray, T: np.ndarray
     ) -> np.ndarray:
-    
         i = 1j
+        
+        # Ensure S0 is an array for consistent broadcasting
+        S0 = np.atleast_1d(S0)
 
         def integrand1(u: complex):
             return np.real(
                 self.__characteristic_function(S0, r, u - i, T)
                 * np.exp(-i * u * np.log(K))
-                /(i* u)
+                / (i * u)
             )
 
         def integrand2(u: complex):
             return np.real(
                 self.__characteristic_function(S0, r, u, T)
                 * np.exp(-i * u * np.log(K))
-                / (i* u)
+                / (i * u)
             )
 
         integral1 = quad_vec(integrand1, 0, 100, limit=100)[0]
         integral2 = quad_vec(integrand2, 0, 100, limit=100)[0]
 
-        return( .5*(S0-np.exp(-r*T)*K)
-            + np.exp(-r * T) / np.pi * (integral1
-            - K * integral2))
-        
+        return 0.5 * (S0 - np.exp(-r * T) * K) + np.exp(-r * T) / np.pi * (
+            integral1 - K * integral2
+        )
 
-
-
-    def _gradient(self,
-        S0: float, r: float, K: np.ndarray, T: np.ndarray
+    def _gradient(
+        self, S0: np.ndarray | float, r: float, K: np.ndarray, T: np.ndarray
     ) -> np.ndarray:
         i = 1j
+        
+        # Ensure S0 is an array for consistent broadcasting
+        S0 = np.atleast_1d(S0)
 
         def integrand1(u: complex):
             return np.real(
                 self.__characteristic_function(S0, r, u - i, T)
-                * self.__h_vector(u-i, T)
+                * self.__h_vector(u - i, T)
                 * np.exp(np.log(K) * -i * u)
                 / (i * u)
             )
@@ -228,28 +212,30 @@ class HestonModel(BaseModel):
 
         integral1 = quad_vec(integrand1, 0, 100, limit=100)[0]
         integral2 = quad_vec(integrand2, 0, 100, limit=100)[0]
-        return (
-            np.exp(-r * T) / np.pi * (integral1- K * integral2)
-        )
-    def _square_error(self,
-        S0: float, r: float, strikes: np.ndarray, maturities: np.ndarray, market_prices: np.ndarray):
+        return np.exp(-r * T) / np.pi * (integral1 - K * integral2)
+
+    def _square_error(
+        self,
+        S0: np.ndarray | float,
+        r: float,
+        strikes: np.ndarray,
+        maturities: np.ndarray,
+        market_prices: np.ndarray,
+    ):
         predictions = self._heston_price_call(S0, r, strikes, maturities)
         residuals = predictions - market_prices
         return 0.5 * np.sum(residuals**2)
-    
-    def _grad_loss(self,
-        S0: float, r: float, strikes: np.ndarray, maturities: np.ndarray, market_prices: np.ndarray
+
+    def _grad_loss(
+        self,
+        S0: np.ndarray | float,
+        r: float,
+        strikes: np.ndarray,
+        maturities: np.ndarray,
+        market_prices: np.ndarray,
     ):
         predictions = self._heston_price_call(S0, r, strikes, maturities)
         residuals = predictions - market_prices
         jacobian = self._gradient(S0, r, strikes, maturities)
 
         return jacobian @ residuals
-
-
-
- 
-    
-
-
-

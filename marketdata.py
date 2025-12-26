@@ -6,7 +6,7 @@ from blackscholes import __implied_volatility as bs_iv
 
 
 class MarketData(BaseModel):
-    spot_price: float  # S0
+    spot_price: np.ndarray  # S0 - now an array instead of float
     risk_free_rate: float  # r
     strikes: np.ndarray  # K
     maturities: np.ndarray  # T
@@ -18,14 +18,10 @@ class MarketData(BaseModel):
     @model_validator(mode='after')
     def __post_init__(self):
         """Validate arrays have consistent shapes"""
-        if not (len(self.strikes) == len(self.maturities) == len(self.market_prices)):
-            raise ValueError("Strikes, maturities, and prices must have same length")
+        if not (len(self.spot_price)==len(self.strikes) == len(self.maturities) == len(self.market_prices)):
+            raise ValueError("Spot prices, strikes, maturities, and prices must have same length")
         return self
 
-    """TODo: download data methods
-    @classmethod
-    download_data(source='y_finance')
-    """
     @classmethod
     def from_yahoo_finance(
         cls,
@@ -33,7 +29,7 @@ class MarketData(BaseModel):
         risk_free_rate: float = 0.04,
         option_type: str = "call",
         min_volume: int = 10,
-    ) -> MarketData:
+    ):
         stock: yf.Ticker = yf.Ticker(ticker)
         spot_price = stock.fast_info["lastPrice"]
 
@@ -43,6 +39,7 @@ class MarketData(BaseModel):
         strikes_list = []
         maturities_list = []
         prices_list = []
+        spot_prices_list = []
 
         # Current date for time-to-maturity calculation
         from datetime import datetime
@@ -85,38 +82,37 @@ class MarketData(BaseModel):
                 # Use mid price (average of bid and ask)
                 mid_price = (row.bid + row.ask) / 2
                 prices_list.append(mid_price)
+                spot_prices_list.append(spot_price)
 
         # Convert to numpy arrays
         strikes = np.array(strikes_list)
         maturities = np.array(maturities_list)
         market_prices = np.array(prices_list)
+        spot_prices = np.array(spot_prices_list)
 
         return cls(
-            spot_price=spot_price,
+            spot_price=spot_prices,
             risk_free_rate=risk_free_rate,
             strikes=strikes,
             maturities=maturities,
             market_prices=market_prices,
         )
+        
     def testing(self, train_ratio: float = 0.75):
-  
-        
-        
         # Stack arrays to shuffle together
-        values = np.array([self.strikes, self.maturities, self.market_prices])
-        num_columns = values.shape[1]
+        num_options = len(self.strikes)
         
         # Generate shuffled indices
-        shuffled_indices = np.random.permutation(num_columns)
+        shuffled_indices = np.random.permutation(num_options)
         
         # Split indices
-        split = int(num_columns * train_ratio)
+        split = int(num_options * train_ratio)
         train_indices = shuffled_indices[:split]
         test_indices = shuffled_indices[split:]
         
         # Create training data
         training_data = MarketData(
-            spot_price=self.spot_price,
+            spot_price=self.spot_price[train_indices],
             risk_free_rate=self.risk_free_rate,
             strikes=self.strikes[train_indices],
             maturities=self.maturities[train_indices],
@@ -125,7 +121,7 @@ class MarketData(BaseModel):
         
         # Create testing data
         testing_data = MarketData(
-            spot_price=self.spot_price,
+            spot_price=self.spot_price[test_indices],
             risk_free_rate=self.risk_free_rate,
             strikes=self.strikes[test_indices],
             maturities=self.maturities[test_indices],
@@ -134,27 +130,28 @@ class MarketData(BaseModel):
         
         return training_data, testing_data
     
-    def atm(self,tolerance=.05,max_iter=100):
-        
+    def atm(self, tolerance=.05, max_iter=100):
         # Generate shuffled indices
-        S0=self.spot_price
-        r=self.risk_free_rate
+        S0 = self.spot_price
+        r = self.risk_free_rate
         forward_prices = S0 * np.exp(r * self.maturities)
     
-    # Compute moneyness: |F - K|
+        # Compute moneyness: |F - K|
         moneyness = np.abs(forward_prices - self.strikes)
         
-    
-    # Create mask for ATM options
-        atm_mask = moneyness < tolerance*S0
+        # Use mean spot price for tolerance calculation
+        mean_spot = np.mean(S0)
+        
+        # Create mask for ATM options
+        atm_mask = moneyness < tolerance * mean_spot
         while not atm_mask.any() and max_iter:
-            tolerance+=.01*S0
-            atm_mask=moneyness < tolerance
-            max_iter-=1
+            tolerance += .01
+            atm_mask = moneyness < tolerance * mean_spot
+            max_iter -= 1
     
-    # Stack back into shape (3, n)
+        # Stack back into shape (3, n)
         atm_options = MarketData(
-            spot_price=self.spot_price,
+            spot_price=self.spot_price[atm_mask],
             risk_free_rate=self.risk_free_rate,
             strikes=self.strikes[atm_mask],
             maturities=self.maturities[atm_mask],
@@ -163,20 +160,16 @@ class MarketData(BaseModel):
     
         return atm_options
     
-    def short_term(self,tolerance=.01,max_iter=100):
-
-
-    
-    
+    def short_term(self, tolerance=.01, max_iter=100):
         short_mask = self.maturities < tolerance
-        #make sure there is at least one
+        # make sure there is at least one
         while not short_mask.any() and max_iter:
-            tolerance+=.01
+            tolerance += .01
             short_mask = self.maturities < tolerance
-            max_iter-=1
+            max_iter -= 1
     
         atm_options = MarketData(
-            spot_price=self.spot_price,
+            spot_price=self.spot_price[short_mask],
             risk_free_rate=self.risk_free_rate,
             strikes=self.strikes[short_mask],
             maturities=self.maturities[short_mask],
@@ -185,8 +178,7 @@ class MarketData(BaseModel):
     
         return atm_options
     
-    def remove_outliers(self, strike_tol: float = 0.05, maturity_tol: float = 0.02, price_threshold: float = 3.0) -> MarketData:
-       
+    def remove_outliers(self, strike_tol: float = 0.05, maturity_tol: float = 0.02, price_threshold: float = 3.0):
         keep_mask = np.ones(len(self.strikes), dtype=bool)
         
         for i in range(len(self.strikes)):
@@ -213,18 +205,26 @@ class MarketData(BaseModel):
                 modified_z_score = 0.6745 * np.abs(price - median) / mad
                 if modified_z_score > price_threshold:
                     keep_mask[i] = False
-        non_zero = self.market_prices > 0.01
-        keep_mask = keep_mask & non_zero
+        
+        # Filter out zero or near-zero prices
+        non_zero_price = self.market_prices > 0.01
+        
+        # Filter out zero or near-zero maturities
+        non_zero_maturity = self.maturities > 0.0
+        
+        # Combine all filters
+        keep_mask = keep_mask & non_zero_price & non_zero_maturity
+        
         # Return new MarketData with filtered data
         return MarketData(
-            spot_price=self.spot_price,
+            spot_price=self.spot_price[keep_mask],
             risk_free_rate=self.risk_free_rate,
             strikes=self.strikes[keep_mask],
             maturities=self.maturities[keep_mask],
             market_prices=self.market_prices[keep_mask]
         )
-    def filter_deep_itm(self, threshold: float = 0.5) -> MarketData:
         
+    def filter_deep_itm(self, threshold: float = 0.5):
         # Calculate forward prices for each maturity
         forward_prices = self.spot_price * np.exp(self.risk_free_rate * self.maturities)
         
@@ -232,7 +232,7 @@ class MarketData(BaseModel):
         not_deep_itm_mask = self.market_prices < (forward_prices * threshold)
         
         return MarketData(
-            spot_price=self.spot_price,
+            spot_price=self.spot_price[not_deep_itm_mask],
             risk_free_rate=self.risk_free_rate,
             strikes=self.strikes[not_deep_itm_mask],
             maturities=self.maturities[not_deep_itm_mask],
@@ -254,13 +254,13 @@ class MarketData(BaseModel):
         )
     
     def validate_option_data(
-    self,
-    tolerance=0.01,
-    check_monotonicity=False,
-    check_iv=False,
-    iv_multiplier=3.0,
-    return_outliers=False,
-):
+        self,
+        tolerance=0.01,
+        check_monotonicity=False,
+        check_iv=False,
+        iv_multiplier=3.0,
+        return_outliers=False,
+    ):
         S0 = self.spot_price
         K = self.strikes
         T = self.maturities
@@ -317,9 +317,11 @@ class MarketData(BaseModel):
 
                 t_strikes = K[t_mask]
                 t_ivs = ivs[t_mask]
+                t_s0 = S0[t_mask]
 
-                # Find ATM
-                F = S0 * np.exp(r * t)
+                # Find ATM - use mean spot price for this maturity
+                mean_s0 = np.mean(t_s0)
+                F = mean_s0 * np.exp(r * t)
                 atm_idx = np.argmin(np.abs(t_strikes - F))
                 atm_iv = t_ivs[atm_idx]
 
@@ -349,9 +351,10 @@ class MarketData(BaseModel):
             print(f"  - Monotonicity violations: {monotonicity_violations}")
         if check_iv:
             print(f"  - IV outliers/unsolvable: {iv_violations}")
+            
         if not return_outliers:
             return MarketData(
-                spot_price=S0,
+                spot_price=S0[valid_mask],
                 risk_free_rate=r,
                 strikes=K[valid_mask],
                 maturities=T[valid_mask],
@@ -360,25 +363,15 @@ class MarketData(BaseModel):
         else:
             removed = ~valid_mask
             return MarketData(
-                spot_price=S0,
+                spot_price=S0[valid_mask],
                 risk_free_rate=r,
                 strikes=K[valid_mask],
                 maturities=T[valid_mask],
                 market_prices=C[valid_mask],
             ), MarketData(
-                spot_price=S0,
+                spot_price=S0[removed],
                 risk_free_rate=r,
                 strikes=K[removed],
                 maturities=T[removed],
                 market_prices=C[removed],
             )
-
-
-    
-                
-
-
-
-        
-        
-
